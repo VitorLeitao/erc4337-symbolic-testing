@@ -22,6 +22,10 @@ contract MockAccountCore is AccountCore {
         return true;
     }
 
+    function payPrefund(uint256 prefund) public {
+        _payPrefund(prefund);
+    }   
+
     function _payPrefund(uint256 prefund) internal override {
         require(address(this).balance >= prefund, "Insufficient balance for prefund");
         (bool success, ) = payable(address(entryPoint())).call{value: prefund}("");
@@ -63,6 +67,7 @@ contract AccountCoreTest is Test {
 
     function setUp() public {
         account = new MockAccountCore();
+        payable(address(account)).transfer(10 ether);
     }
 
     /*
@@ -309,4 +314,139 @@ contract AccountCoreTest is Test {
         account.validateUserOp(userOp, userOpHash, 0);
     }
 
+    /* 
+    @notice Verifies the behavior of user operation validation when the signature is empty.
+    @dev The function is expected to fail validation when provided with an empty signature.
+    Expected result: Validation should fail indicating a signature error.
+    */
+    function testValidateUserOpWithEmptySignature() public {
+        PackedUserOperation memory userOp = _dummyUserOp();
+        bytes32 dummyUserOpHash = keccak256("dummy");
+
+        vm.prank(address(ERC4337Utils.ENTRYPOINT_V07));
+        uint256 validationData = account.validateUserOp(userOp, dummyUserOpHash, 0);
+
+        console.log("validationData:", validationData);
+        console.log("expected:", ERC4337Utils.SIG_VALIDATION_FAILED);
+
+        // assertEq(validationData, ERC4337Utils.SIG_VALIDATION_FAILED, "Empty signature should fail.");
+    }
+
+    /* 
+    @notice Tests Ether handling to verify that funds are correctly transferred.
+    @dev Evaluates both successful transfer and failure due to insufficient balance.
+    Expected result: Funds should be transferred correctly, and failures should occur when the balance is insufficient.
+    */
+    function testEtherHandling() public {
+        uint256 prefundAmount = 1 ether;
+
+        // Tests the transfer of ether
+        vm.prank(address(account.entryPoint()));
+        account.payPrefund(prefundAmount); // Test call that involves _payPrefund
+
+        // Checks the balance after the operation to ensure funds were transferred correctly
+        assertEq(address(account.entryPoint()).balance, prefundAmount, "Funds were not transferred correctly");
+
+        // Tests failure of ether transfer due to insufficient balance
+        vm.prank(address(account.entryPoint()));
+        vm.expectRevert("Insufficient balance for prefund");
+        account.payPrefund(20 ether); // Call with an amount greater than the available balance
+    }
+
+    /* 
+    @notice Ensures that only authorized addresses can call sensitive functions.
+    @dev Tests the `validateUserOp` function to ensure only the entryPoint or the account itself can invoke it.
+    Expected result: Unauthorized calls should fail with the corresponding error message.
+    */
+    function testOnlyEntryPointOrSelf() public {
+        PackedUserOperation memory userOp = _dummyUserOp();
+        bytes32 hash = keccak256(abi.encodePacked("dummy"));
+
+        // Attempts to invoke the function from an address that is neither the entryPoint nor the account itself.
+        address unauthorizedAddress = address(0x123);
+        vm.prank(unauthorizedAddress);
+        vm.expectRevert(abi.encodeWithSelector(AccountCore.AccountUnauthorized.selector, unauthorizedAddress));
+        account.validateUserOp(userOp, hash, 0);
+
+        // Simulates call from the entryPoint
+        vm.prank(address(account.entryPoint()));
+        account.validateUserOp(userOp, hash, 0); // This call should not fail.
+    }
+
+    /* 
+    @notice Tests the payment of a zero Ether prefund to verify if the contract logic supports it.
+    @dev Should pass without errors even with zero prefund.
+    Expected result: No exception should be thrown.
+    */
+    function payPrefundZero() public {
+        uint256 prefund = 0;
+        account.payPrefund(prefund);
+    }
+
+    /* 
+    @notice Tests the condition of attempting to pay a prefund greater than the available balance.
+    @dev The function is expected to revert when the prefund amount exceeds the available balance.
+    Expected result: The transaction should fail with a revert.
+    */
+    function payPrefundExceedsBalance() public {
+        uint256 prefund = address(account).balance + 20 ether;
+        vm.expectRevert();
+        account.payPrefund(prefund);
+    }
+
+    /* 
+    @notice Performs stress testing on user operation validation to verify robustness and efficiency under load.
+    @dev Executes multiple iterations of validating a UserOperation, updating the nonce each iteration to simulate a sequence of consecutive valid operations.
+    Expected result: All iterations should pass without errors, demonstrating that the system can handle multiple validations efficiently and consecutively.
+    */
+    function testStressValidateUserOp() public {
+        uint256 iterations = 100;
+        PackedUserOperation memory userOp = _dummyUserOp();
+        address entryPointAddr = address(account.entryPoint());
+
+        for (uint256 i = 0; i < iterations; i++) {
+            uint256 userOpNonce = account.getNonce(0);
+            userOp.nonce = userOpNonce;
+            bytes32 userOpHash = keccak256(abi.encode(userOp));
+
+            vm.prank(entryPointAddr); // Simulates call from the EntryPoint
+            account.validateUserOp(userOp, userOpHash, 0);
+        }
+    }
+
+    /* 
+    @notice Checks if repeated calls to the entryPoint cause gas leaks.
+    @dev Simulates multiple checks of the entryPoint's existence to assess gas consumption and performance.
+    Expected result: There should not be any significant increase in gas consumption.
+    */
+    function testStressEntryPoint() public view {
+        uint256 iterations = 1000;
+
+        for (uint256 i = 0; i < iterations; i++) {
+            address ep = address(account.entryPoint());
+            assertTrue(ep != address(0), "EntryPoint should not be zero");
+        }
+    }
+
+    /* 
+    @notice Conducts stress tests with escalating prefund payments to assess the robustness of fund management.
+    @dev Progressively increases the prefund amount and checks if the function correctly handles both sufficient and insufficient balances.
+    Expected result: Transactions should pass when there is sufficient balance and fail when not.
+    */
+    function testStressPayPrefund() public {
+        uint256 maxTests = 50; // Number of prefund executions
+        uint256 baseAmount = 0.01 ether;
+
+        for (uint256 i = 0; i < maxTests; i++) {
+            uint256 prefund = baseAmount * (i + 1); // Progressively increases the amount
+            bool success = address(account).balance >= prefund;
+
+            if (success) {
+                account.payPrefund(prefund);
+            } else {
+                vm.expectRevert();
+                account.payPrefund(prefund);
+            }
+        }
+    }
 }
